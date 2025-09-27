@@ -5,12 +5,13 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import fs from 'fs';
 import path from 'path';
+import flowRoutes from "./routes/flow";
 
 // Load environment variables from .env file
 try {
   const envPath = path.resolve(process.cwd(), '.env');
   if (fs.existsSync(envPath)) {
-    const envConfig = fs.readFileSync(envPath, 'utf8')
+    fs.readFileSync(envPath, 'utf8')
       .split('\n')
       .filter(line => line.trim() !== '' && !line.startsWith('#'))
       .forEach(line => {
@@ -20,6 +21,8 @@ try {
         }
       });
     log("Environment variables loaded from .env file");
+  } else {
+    log(".env file not found — running with system env vars/defaults");
   }
 } catch (error) {
   console.error("Error loading .env file:", error);
@@ -28,16 +31,15 @@ try {
 const app = express();
 const SessionStore = MemoryStore(session);
 
+app.use("/api", flowRoutes);
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(session({
   secret: "portai-session-secret",
   resave: false,
   saveUninitialized: false,
-  store: new SessionStore({
-    checkPeriod: 86400000 // prune expired entries every 24h
-  }),
-  cookie: { secure: false } // set to true in production with HTTPS
+  store: new SessionStore({ checkPeriod: 86400000 }),
+  cookie: { secure: false }
 }));
 
 // Logging middleware
@@ -51,42 +53,37 @@ app.use((req, res, next) => {
   });
   next();
 });
-
-// Kill any existing process on port 5000
-process.on('uncaughtException', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    log('Port 5000 is in use, attempting to close previous instance...');
-    process.exit(1);
-  } else {
-    console.error('Uncaught Exception:', err);
-    process.exit(1);
-  }
+// Error-handling middleware (for express errors)
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error("Server error:", err);
+  res.status(err.status || 500).json({
+    error: err.message || "Internal Server Error"
+  });
 });
 
+// Main async startup
 (async () => {
   try {
-    const server = await registerRoutes(app);
+    await registerRoutes(app);
 
-    app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-      console.error("Server error:", err);
-      res.status(err.status || 500).json({
-        error: err.message || "Internal Server Error"
-      });
+    if (app.get("env") !== "development") {
+      serveStatic(app);
+    }
+
+    const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+    const HOST = 'localhost';
+
+    const server = app.listen(PORT, HOST, () => {
+      log(`Server listening at http://${HOST}:${PORT}`);
     });
 
     if (app.get("env") === "development") {
       await setupVite(app, server);
-    } else {
-      serveStatic(app);
     }
 
-    const port = process.env.PORT || 5000;
-    server.listen({
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    }, () => {
-      log(`Server running on port ${port}`);
+    server.on('error', (err: any) => {
+      console.error("Server startup error:", err);
+      process.exit(1);
     });
   } catch (error) {
     console.error("Failed to start server:", error);
